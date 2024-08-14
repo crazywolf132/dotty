@@ -306,7 +306,6 @@ name = "dotty"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "chrono",
  "clap",
  "colored",
  "dirs",

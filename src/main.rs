@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use chrono::prelude::*;
 use clap::Parser;
 use colored::*;
 use git2::{Cred, RemoteCallbacks, Repository};
