@@ -1,0 +1,142 @@
+name: Release Dotty
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New version number (e.g., 1.2.3)'
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate_and_prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      changelog: ${{ steps.changelog.outputs.changelog }}
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache dependencies
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Validate version
+        run: |
+          current_version=$(grep '^version = ' Cargo.toml | sed 's/^version = "\(.*\)"/\1/')
+          if ! [[ "${{ github.event.inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version format. Please use semantic versioning (e.g., 1.2.3)"
+            exit 1
+          fi
+          if ! [ "$(printf '%s\n' "$current_version" "${{ github.event.inputs.version }}" | sort -V | head -n1)" = "$current_version" ]; then
+            echo "New version must be greater than the current version ($current_version)"
+            exit 1
+          fi
+
+      - name: Update version in Cargo.toml
+        run: |
+          sed -i 's/^version = .*/version = "${{ github.event.inputs.version }}"/' Cargo.toml
+
+      - name: Run lints
+        run: |
+          cargo fmt -- --check
+          cargo clippy -- -D warnings
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Generate changelog
+        id: changelog
+        uses: heinrichreimer/github-changelog-generator-action@v2.3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          futureRelease: ${{ github.event.inputs.version }}
+
+      - name: Commit version update
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add Cargo.toml
+          git commit -m "Bump version to ${{ github.event.inputs.version }}"
+          git push
+
+  build_and_release:
+    needs: validate_and_prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - x86_64-apple-darwin
+          - x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+
+      - name: Cache dependencies
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release
+        uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: --release --target ${{ matrix.target }}
+
+      - name: Package release
+        run: |
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            7z a dotty-${{ github.event.inputs.version }}-${{ matrix.target }}.zip ./target/${{ matrix.target }}/release/dotty.exe
+          else
+            tar -czf dotty-${{ github.event.inputs.version }}-${{ matrix.target }}.tar.gz -C ./target/${{ matrix.target }}/release dotty
+          fi
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ github.event.inputs.version }}
+          release_name: Release ${{ github.event.inputs.version }}
+          body: ${{ needs.validate_and_prepare.outputs.changelog }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./dotty-${{ github.event.inputs.version }}-${{ matrix.target }}.*
+          asset_name: dotty-${{ github.event.inputs.version }}-${{ matrix.target }}.*
+          asset_content_type: application/octet-stream
