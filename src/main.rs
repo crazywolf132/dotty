@@ -1,21 +1,21 @@
-use std::path::{Path, PathBuf};
-use std::{env, fs};
+use anyhow::{Context, Result};
+use chrono::prelude::*;
+use clap::Parser;
+use colored::*;
+use git2::{Cred, RemoteCallbacks, Repository};
+use ignore::WalkBuilder;
+use job_scheduler::{Job, JobScheduler};
+use log::{error, info, warn};
+use notify::{watcher, RecursiveMode, Watcher};
+use serde::{Deserialize, Serialize};
+use similar::{ChangeTag, TextDiff};
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
-use notify::{Watcher, RecursiveMode, watcher};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::time::{Duration, SystemTime};
-use clap::Parser;
-use git2::{Repository, RemoteCallbacks, Cred};
-use toml;
-use chrono::prelude::*;
-use anyhow::{Context, Result};
-use log::{info, warn, error};
-use ignore::WalkBuilder;
-use similar::{ChangeTag, TextDiff};
-use colored::*;
+use std::{env, fs};
 use symlink::symlink_file;
-use job_scheduler::{Job, JobScheduler};
+use toml;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -77,7 +77,7 @@ struct Config {
 
 #[derive(Serialize, Deserialize, Clone)]
 struct ProfileDetectionConfig {
-    rules: Vec<ProfileDetectionRule>
+    rules: Vec<ProfileDetectionRule>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -118,13 +118,17 @@ struct Dotty {
 
 impl Dotty {
     fn new() -> Result<Self> {
-        let config_dir = dirs::config_dir().context("Failed to get config directory")?.join("dotty");
+        let config_dir = dirs::config_dir()
+            .context("Failed to get config directory")?
+            .join("dotty");
         fs::create_dir_all(&config_dir).context("Failed to create config directory")?;
         let config_path = config_dir.join("config.toml");
 
         let config = if config_path.exists() {
-            let config_str = fs::read_to_string(&config_path).context("Failed to read config file")?;
-            let config: Config = toml::from_str(&config_str).context("Failed to parse config file")?;
+            let config_str =
+                fs::read_to_string(&config_path).context("Failed to read config file")?;
+            let config: Config =
+                toml::from_str(&config_str).context("Failed to parse config file")?;
             config.validate()?;
             config
         } else {
@@ -135,7 +139,7 @@ impl Dotty {
                         files: HashMap::new(),
                         ignore_patterns: vec![".git".to_string(), ".gitignore".to_string()],
                         use_symlinks: false,
-                    }
+                    },
                 )]),
                 remote: RemoteConfig {
                     github_repo: String::new(),
@@ -144,7 +148,8 @@ impl Dotty {
                 sync_interval: 300,
                 profile_detection: None,
             };
-            let config_str = toml::to_string_pretty(&default_config).context("Failed to serialize default config")?;
+            let config_str = toml::to_string_pretty(&default_config)
+                .context("Failed to serialize default config")?;
             fs::write(&config_path, config_str).context("Failed to write default config file")?;
             default_config
         };
@@ -165,7 +170,11 @@ impl Dotty {
     fn detect_profile(&self) -> String {
         if let Some(profile_detection) = &self.config.profile_detection {
             for rule in &profile_detection.rules {
-                if rule.conditions.iter().all(|condition| self.check_condition(condition)) {
+                if rule
+                    .conditions
+                    .iter()
+                    .all(|condition| self.check_condition(condition))
+                {
                     return rule.profile.clone();
                 }
             }
@@ -175,24 +184,35 @@ impl Dotty {
 
     fn check_condition(&self, condition: &DetectionCondition) -> bool {
         match condition {
-            DetectionCondition::Hostname(hostname) => hostname == &hostname::get().unwrap().to_string_lossy(),
+            DetectionCondition::Hostname(hostname) => {
+                hostname == &hostname::get().unwrap().to_string_lossy()
+            }
             DetectionCondition::OS(os) => os == env::consts::OS,
-            DetectionCondition::EnvVar { name, value } => env::var(name).map(|v| v == *value).unwrap_or(false),
+            DetectionCondition::EnvVar { name, value } => {
+                env::var(name).map(|v| v == *value).unwrap_or(false)
+            }
         }
     }
 
     fn save_config(&self) -> Result<()> {
-        let config_str = toml::to_string_pretty(&self.config).context("Failed to serialize config")?;
+        let config_str =
+            toml::to_string_pretty(&self.config).context("Failed to serialize config")?;
         fs::write(&self.config_path, config_str).context("Failed to write config file")?;
         Ok(())
     }
 
     fn add_file(&mut self, path: &Path, profile: Option<String>) -> Result<()> {
         let profile = profile.unwrap_or_else(|| self.current_profile.clone());
-        let profile_config = self.config.profiles.get_mut(&profile).context("Profile not found")?;
+        let profile_config = self
+            .config
+            .profiles
+            .get_mut(&profile)
+            .context("Profile not found")?;
 
         let canonical_path = path.canonicalize().context("Failed to canonicalize path")?;
-        let relative_path = canonical_path.strip_prefix(dirs::home_dir().context("Failed to get home directory")?).context("Path is not in home directory")?;
+        let relative_path = canonical_path
+            .strip_prefix(dirs::home_dir().context("Failed to get home directory")?)
+            .context("Path is not in home directory")?;
         profile_config.files.insert(
             relative_path.to_string_lossy().into_owned(),
             canonical_path.to_string_lossy().into_owned(),
@@ -204,11 +224,21 @@ impl Dotty {
 
     fn remove_file(&mut self, path: &Path, profile: Option<String>) -> Result<()> {
         let profile = profile.unwrap_or_else(|| self.current_profile.clone());
-        let profile_config = self.config.profiles.get_mut(&profile).context("Profile not found")?;
+        let profile_config = self
+            .config
+            .profiles
+            .get_mut(&profile)
+            .context("Profile not found")?;
 
         let canonical_path = path.canonicalize().context("Failed to canonicalize path")?;
-        let relative_path = canonical_path.strip_prefix(dirs::home_dir().context("Failed to get home directory")?).context("Path is not in home directory")?;
-        if profile_config.files.remove(&relative_path.to_string_lossy().into_owned()).is_some() {
+        let relative_path = canonical_path
+            .strip_prefix(dirs::home_dir().context("Failed to get home directory")?)
+            .context("Path is not in home directory")?;
+        if profile_config
+            .files
+            .remove(&relative_path.to_string_lossy().into_owned())
+            .is_some()
+        {
             self.save_config()?;
             info!("Removed file: {:?} from profile {}", relative_path, profile);
         } else {
@@ -219,13 +249,19 @@ impl Dotty {
 
     fn sync(&mut self, profile: Option<String>) -> Result<()> {
         let profile = profile.unwrap_or_else(|| self.current_profile.clone());
-        let profile_config = self.config.profiles.get(&profile).context("Profile not found")?;
+        let profile_config = self
+            .config
+            .profiles
+            .get(&profile)
+            .context("Profile not found")?;
 
         self.show_diff(&profile)?;
 
         for (relative_path, canonical_path) in &profile_config.files {
             let source = Path::new(canonical_path);
-            let dest = dirs::home_dir().context("Failed to get home directory")?.join(relative_path);
+            let dest = dirs::home_dir()
+                .context("Failed to get home directory")?
+                .join(relative_path);
 
             if source.exists() {
                 if self.should_sync(source, profile_config) {
@@ -252,15 +288,23 @@ impl Dotty {
     }
 
     fn show_diff(&self, profile: &str) -> Result<()> {
-        let profile_config = self.config.profiles.get(profile).context("Profile not found")?;
+        let profile_config = self
+            .config
+            .profiles
+            .get(profile)
+            .context("Profile not found")?;
 
         for (relative_path, canonical_path) in &profile_config.files {
             let source = Path::new(canonical_path);
-            let dest = dirs::home_dir().context("Failed to get home directory")?.join(relative_path);
+            let dest = dirs::home_dir()
+                .context("Failed to get home directory")?
+                .join(relative_path);
 
             if source.exists() && dest.exists() {
-                let source_content = fs::read_to_string(source).context("Failed to read source file")?;
-                let dest_content = fs::read_to_string(&dest).context("Failed to read destination file")?;
+                let source_content =
+                    fs::read_to_string(source).context("Failed to read source file")?;
+                let dest_content =
+                    fs::read_to_string(&dest).context("Failed to read destination file")?;
 
                 let diff = TextDiff::from_lines(&dest_content, &source_content);
 
@@ -293,7 +337,8 @@ impl Dotty {
     fn sync_permissions(&self, source: &Path, dest: &Path) -> Result<()> {
         let metadata = fs::metadata(source).context("Failed to get source file metadata")?;
         let permissions = metadata.permissions();
-        fs::set_permissions(dest, permissions).context("Failed to set permissions on destination file")?;
+        fs::set_permissions(dest, permissions)
+            .context("Failed to set permissions on destination file")?;
         Ok(())
     }
 
@@ -307,7 +352,11 @@ impl Dotty {
             match result {
                 Ok(entry) => {
                     let path = entry.path();
-                    if profile_config.ignore_patterns.iter().any(|pattern| path.to_str().map_or(false, |s| s.contains(pattern))) {
+                    if profile_config
+                        .ignore_patterns
+                        .iter()
+                        .any(|pattern| path.to_str().map_or(false, |s| s.contains(pattern)))
+                    {
                         return false;
                     }
                 }
@@ -321,12 +370,15 @@ impl Dotty {
     }
 
     fn sync_with_github(&self) -> Result<()> {
-        let repo_path = dirs::home_dir().context("Failed to get home directory")?.join(".dotty_repo");
+        let repo_path = dirs::home_dir()
+            .context("Failed to get home directory")?
+            .join(".dotty_repo");
 
         let repo = if repo_path.exists() {
             Repository::open(&repo_path).context("Failed to open existing repository")?
         } else {
-            Repository::clone(&self.config.remote.github_repo, &repo_path).context("Failed to clone repository")?
+            Repository::clone(&self.config.remote.github_repo, &repo_path)
+                .context("Failed to clone repository")?
         };
 
         // Copy files to the repo
@@ -336,7 +388,8 @@ impl Dotty {
                 let dest = repo_path.join(relative_path);
 
                 if source.exists() {
-                    fs::create_dir_all(dest.parent().unwrap()).context("Failed to create parent directories")?;
+                    fs::create_dir_all(dest.parent().unwrap())
+                        .context("Failed to create parent directories")?;
                     fs::copy(source, &dest).context("Failed to copy file to repo")?;
                 }
             }
@@ -344,14 +397,20 @@ impl Dotty {
 
         // Commit and push changes
         let mut index = repo.index().context("Failed to get repo index")?;
-        index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None).context("Failed to add files to index")?;
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .context("Failed to add files to index")?;
         index.write().context("Failed to write index")?;
 
         let tree_id = index.write_tree().context("Failed to write tree")?;
         let tree = repo.find_tree(tree_id).context("Failed to find tree")?;
 
         let signature = repo.signature().context("Failed to get signature")?;
-        let parent_commit = repo.head().context("Failed to get HEAD")?.peel_to_commit().context("Failed to peel to commit")?;
+        let parent_commit = repo
+            .head()
+            .context("Failed to get HEAD")?
+            .peel_to_commit()
+            .context("Failed to peel to commit")?;
 
         repo.commit(
             Some("HEAD"),
@@ -360,15 +419,22 @@ impl Dotty {
             "Sync dotfiles",
             &tree,
             &[&parent_commit],
-        ).context("Failed to create commit")?;
+        )
+        .context("Failed to create commit")?;
 
-        let mut remote = repo.find_remote("origin").context("Failed to find remote 'origin'")?;
+        let mut remote = repo
+            .find_remote("origin")
+            .context("Failed to find remote 'origin'")?;
         let mut callbacks = RemoteCallbacks::new();
         callbacks.credentials(|_, _, _| {
             Cred::userpass_plaintext("x-access-token", &self.config.remote.github_token)
         });
 
-        remote.push(&["refs/heads/master:refs/heads/master"], Some(git2::PushOptions::new().remote_callbacks(callbacks)))
+        remote
+            .push(
+                &["refs/heads/master:refs/heads/master"],
+                Some(git2::PushOptions::new().remote_callbacks(callbacks)),
+            )
             .context("Failed to push changes")?;
 
         info!("Synced with GitHub repository");
@@ -377,16 +443,26 @@ impl Dotty {
 
     fn watch_and_sync(&mut self, profile: Option<String>) -> Result<()> {
         let profile = profile.unwrap_or_else(|| self.current_profile.clone());
-        let profile_config = self.config.profiles.get(&profile).context("Profile not found")?;
+        let profile_config = self
+            .config
+            .profiles
+            .get(&profile)
+            .context("Profile not found")?;
 
         let (tx, rx) = channel();
-        let mut watcher = watcher(tx, Duration::from_secs(1)).context("Failed to create watcher")?;
+        let mut watcher =
+            watcher(tx, Duration::from_secs(1)).context("Failed to create watcher")?;
 
         for path in profile_config.files.values() {
-            watcher.watch(path, RecursiveMode::NonRecursive).context("Failed to watch path")?;
+            watcher
+                .watch(path, RecursiveMode::NonRecursive)
+                .context("Failed to watch path")?;
         }
 
-        info!("Watching for changes in profile {}. Press Ctrl-C to stop.", profile);
+        info!(
+            "Watching for changes in profile {}. Press Ctrl-C to stop.",
+            profile
+        );
 
         loop {
             match rx.recv() {
@@ -406,14 +482,20 @@ impl Dotty {
         let profile = profile.unwrap_or_else(|| self.current_profile.clone());
 
         let profile_clone = profile.clone();
-        scheduler.add(Job::new(format!("1/{} * * * * *", interval).parse().unwrap(), move || {
-            let mut dotty = Dotty::new().expect("Failed to create Dotty instance");
-            if let Err(e) = dotty.sync(Some(profile_clone.clone())) {
-                error!("Scheduled sync error: {}", e);
-            }
-        }));
+        scheduler.add(Job::new(
+            format!("1/{} * * * * *", interval).parse().unwrap(),
+            move || {
+                let mut dotty = Dotty::new().expect("Failed to create Dotty instance");
+                if let Err(e) = dotty.sync(Some(profile_clone.clone())) {
+                    error!("Scheduled sync error: {}", e);
+                }
+            },
+        ));
 
-        info!("Scheduled sync every {} minutes for profile {}", interval, profile);
+        info!(
+            "Scheduled sync every {} minutes for profile {}",
+            interval, profile
+        );
         loop {
             scheduler.tick();
             std::thread::sleep(Duration::from_secs(1));
