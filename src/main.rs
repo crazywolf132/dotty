@@ -15,7 +15,6 @@ use std::sync::mpsc::channel;
 use std::time::{Duration, SystemTime};
 use std::{env, fs};
 use symlink::symlink_file;
-use toml;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -500,11 +499,6 @@ impl Dotty {
             scheduler.tick();
             std::thread::sleep(Duration::from_secs(1));
         }
-    }
-
-    fn last_synced_formatted(&self) -> String {
-        let datetime: DateTime<Local> = self.last_synced.into();
-        datetime.format("%Y-%m-%d %H:%M:%S").to_string()
     }
 }
 
