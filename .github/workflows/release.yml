@@ -13,8 +13,6 @@ env:
 jobs:
   validate_and_prepare:
     runs-on: ubuntu-latest
-    outputs:
-      changelog: ${{ steps.changelog.outputs.changelog }}
     steps:
       - uses: actions/checkout@v2
         with:
@@ -59,13 +57,6 @@ jobs:
 
       - name: Run tests
         run: cargo test
-
-      - name: Generate changelog
-        id: changelog
-        uses: heinrichreimer/github-changelog-generator-action@v2.3
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          futureRelease: ${{ github.event.inputs.version }}
 
       - name: Commit version update
         run: |
@@ -127,7 +118,7 @@ jobs:
         with:
           tag_name: v${{ github.event.inputs.version }}
           release_name: Release ${{ github.event.inputs.version }}
-          body: ${{ needs.validate_and_prepare.outputs.changelog }}
+          body: "Latest release of Dotty"
           draft: false
           prerelease: false
 
